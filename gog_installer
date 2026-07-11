@@ -1,31 +1,23 @@
 #!/usr/bin/env bash
 
+type curl > /dev/null 2>&1
+if [[ $? -eq 1 ]]; then
+  echo "curl not installed"
+  exit 1
+fi
 
 readonly config_dir="$HOME/.config/gog_downloader"
-readonly cookie_file="$config_dir/cookies.json"
-cookie_value=""
 dllocfolder=""
 mkdir -p "$config_dir"
-get_firefox_cookies() {
-  local profile_name=$2
-  ff_dir="$HOME/.mozilla/firefox/"
-  if [[ -z "$2" ]] || [[ "$2" =~ ^- ]]; then
-    echo "--get-cookies-from-browser requires the profile chosen"
-    exit 1
-  fi
-  profile_name=$(find $ff_dir -maxdepth 2 -type d -name "*$2" | head -n 1 | awk -F"/" '{print $6}')
-  cp "$HOME/.mozilla/firefox/$profile_name/cookies.sqlite" "/tmp/firefox_cookies.sqlite"
-  return
-}
-
-enter_cookies_manual() {
-    cookie_value=$1
-    # logic fix: ensure the next arg exists
-    if [[ -z "$cookie_value" ]] || [[ "$cookie_value" =~ ^= ]]; then
-        echo "error: missing cookie value."
-        exit 1
-    fi
-    return
+max_cores=0
+get_num_cores() {
+  local online_cores=$(< /sys/devices/system/cpu/online)
+  local core_arr=( ${online_cores//[,-]/ } )
+  for ((i=0;i < ${#core_arr[@]};i+=2)){
+    local cur_range=$(( ${core_arr[i+1]} - ${core_arr[i]} + 1))
+    (( max_cores += $cur_range ))
+  }
+  max_cores-=1
 }
 
 parse_args(){
@@ -39,15 +31,6 @@ parse_args(){
       -h|--help)
         echo "$help_message"
         exit 0
-        ;;
-      --get-cookies-from-browser)
-        local profile_name=$2
-        get_firefox_cookies profile_name
-        shift 2
-        ;;
-      --enter-cookies)
-        enter_cookies_manual=$2
-        shift 2
         ;;
       --set-download-location)
         if [[ -z "$2" ]] || [[ "$2" =~ ^- ]]; then
@@ -74,3 +57,9 @@ parse_args(){
     esac
   done
 }
+main() {
+  parse_args $@
+  get_num_cores
+}
+
+main $@
