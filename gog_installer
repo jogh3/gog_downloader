@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+
+
+readonly config_dir="$HOME/.config/gog_downloader"
+readonly cookie_file="$config_dir/cookies.json"
+cookie_value=""
+dllocfolder=""
+mkdir -p "$config_dir"
+get_firefox_cookies() {
+  local profile_name=$2
+  ff_dir="$HOME/.mozilla/firefox/"
+  if [[ -z "$2" ]] || [[ "$2" =~ ^- ]]; then
+    echo "--get-cookies-from-browser requires the profile chosen"
+    exit 1
+  fi
+  profile_name=$(find $ff_dir -maxdepth 2 -type d -name "*$2" | head -n 1 | awk -F"/" '{print $6}')
+  cp "$HOME/.mozilla/firefox/$profile_name/cookies.sqlite" "/tmp/firefox_cookies.sqlite"
+  return
+}
+
+enter_cookies_manual() {
+    cookie_value=$1
+    # logic fix: ensure the next arg exists
+    if [[ -z "$cookie_value" ]] || [[ "$cookie_value" =~ ^= ]]; then
+        echo "error: missing cookie value."
+        exit 1
+    fi
+    return
+}
+
+parse_args(){
+
+  local help_message="
+  gog_installer - downloads executables from gog
+  "
+
+  while [[ "$#" -gt 0 ]]; do
+    case $1 in
+      -h|--help)
+        echo "$help_message"
+        exit 0
+        ;;
+      --get-cookies-from-browser)
+        local profile_name=$2
+        get_firefox_cookies profile_name
+        shift 2
+        ;;
+      --enter-cookies)
+        enter_cookies_manual=$2
+        shift 2
+        ;;
+      --set-download-location)
+        if [[ -z "$2" ]] || [[ "$2" =~ ^- ]]; then
+          echo "no download location specified"
+          exit 1
+        fi
+        
+        if [[ "$2" == "~"* ]]; then
+          dllocfolder="${2/#\~/$HOME}"
+        elif [[ "$2" == "default" ]]; then
+          dllocfolder="$HOME/Documents/gog_games"
+        else
+          dllocfolder=$2
+        fi
+        dllocfolder=$(realpath -m "$dllocfolder")
+        dllocfolder="${dllocfolder%/}"
+        shift 2
+        ;;
+      *)
+        echo "unknow argument: $1"
+        echo "$help_message"
+        exit 1
+        ;;
+    esac
+  done
+}
