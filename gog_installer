@@ -5,11 +5,18 @@ if [[ $? -eq 1 ]]; then
   echo "curl not installed"
   exit 1
 fi
-
+type jq > /dev/null 2>&1
+if [[ $? -eq 1 ]];
+  echo "jq not installed"
+  exit 1
+fi
 readonly config_dir="$HOME/.config/gog_downloader"
+readonly config_file="$config_dir/config.json"
 dllocfolder=""
 mkdir -p "$config_dir"
 max_cores=0
+game=""
+login_code=""
 get_num_cores() {
   local online_cores=$(< /sys/devices/system/cpu/online)
   local core_arr=( ${online_cores//[,-]/ } )
@@ -24,6 +31,10 @@ parse_args(){
 
   local help_message="
   gog_installer - downloads executables from gog
+  
+    --set-download-location DIRECTORY_LOCATION sets the location where the mods will download to
+    --help -h displays this message
+    --game -g GAME the game you want to download
   "
 
   while [[ "$#" -gt 0 ]]; do
@@ -49,6 +60,9 @@ parse_args(){
         dllocfolder="${dllocfolder%/}"
         shift 2
         ;;
+      --game | -g)
+        shift 2
+        ;;
       *)
         echo "unknow argument: $1"
         echo "$help_message"
@@ -57,9 +71,31 @@ parse_args(){
     esac
   done
 }
+
+get_authentication(){
+  echo "open: https://auth.gog.com/auth?client_id=46899977096215655&redirect_uri=https%3A%2F%2Fembed.gog.com%2Fon_login_success%3Forigin%3Dclient&response_type=code&layout=client2"
+  local redirect_url
+  read -rp "paste the full redirect url here: " redirect_url
+  login_code=$(echo "$redirect_url" | grep -oP 'code=\K[^&]+')
+}
+
 main() {
   parse_args $@
   get_num_cores
+  if [[ ! -f $config_file ]]; then
+    echo '{"dllocfolder":"","authentication":""}' > $config_file
+  fi
+  if [[ -z "$dllocfolder" ]]; then
+    dllocfolder="$(jq '.dllocfolder' "$config_file")"
+  else
+    jq --arg folder "$dllocfolder" '.dllocfolder = $folder' "$config_file" > tmp.json && mv tmp.json "$config_file"
+  fi
+  if [[ -z "$(jq '.authentication' $config_file)" ]]; then
+    get_authentication
+    if [[ ! -z $login_code ]]; then
+      jq --arg auth_code "$login_code" '.authentication'
+    fi
+  fi
 }
 
 main $@
