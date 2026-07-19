@@ -6,25 +6,31 @@ if [[ $? -eq 1 ]]; then
   exit 1
 fi
 type jq > /dev/null 2>&1
-if [[ $? -eq 1 ]];
+if [[ $? -eq 1 ]]; then
   echo "jq not installed"
   exit 1
 fi
 readonly config_dir="$HOME/.config/gog_downloader"
 readonly config_file="$config_dir/config.json"
+readonly gog_api_prefix="https://api.gog.com"
 dllocfolder=""
 mkdir -p "$config_dir"
 max_cores=0
 game=""
 login_code=""
 get_num_cores() {
-  local online_cores=$(< /sys/devices/system/cpu/online)
-  local core_arr=( ${online_cores//[,-]/ } )
-  for ((i=0;i < ${#core_arr[@]};i+=2)){
-    local cur_range=$(( ${core_arr[i+1]} - ${core_arr[i]} + 1))
-    (( max_cores += $cur_range ))
-  }
-  max_cores-=1
+  read -r online_str < /sys/devices/system/cpu/online
+  IFS=',' read -ra elements <<< "$online_str"
+
+  for item in "${elements[@]}"; do
+      if [[ "$item" =~ - ]]; then
+          IFS='-' read -r start end <<< "$item"
+          (( max_cores += end - start + 1 ))
+      else
+          (( max_cores++ ))
+      fi
+  done
+  (( max_cores -- ))
 }
 
 parse_args(){
@@ -79,23 +85,32 @@ get_authentication(){
   login_code=$(echo "$redirect_url" | grep -oP 'code=\K[^&]+')
 }
 
+get_game_list() {
+  local game_list_url="${gog_api_prefix}/account/getFilteredProducts?sortBy"
+  game_list=$(curl -H "Authorization: Bearer $login_code" $game_list_url)
+}
+
 main() {
   parse_args $@
   get_num_cores
+  echo "max cores available: $max_cores"
   if [[ ! -f $config_file ]]; then
     echo '{"dllocfolder":"","authentication":""}' > $config_file
   fi
   if [[ -z "$dllocfolder" ]]; then
     dllocfolder="$(jq '.dllocfolder' "$config_file")"
   else
-    jq --arg folder "$dllocfolder" '.dllocfolder = $folder' "$config_file" > tmp.json && mv tmp.json "$config_file"
+    jq --arg folder "$dllocfolder" '.dllocfolder = $folder' "$config_file" > /tmp/tmp.json && mv /tmp/tmp.json "$config_file"
   fi
-  if [[ -z "$(jq '.authentication' $config_file)" ]]; then
+  if jq -e '.authentication' "$config_file" >/dev/null; then
     get_authentication
     if [[ ! -z $login_code ]]; then
-      jq --arg auth_code "$login_code" '.authentication'
+      echo "writing auth code to file"
+      jq --arg auth_code "$login_code" '.authentication = $auth_code' "$config_file" > /tmp/tmp.json && mv /tmp/tmp.json "$config_file"
     fi
   fi
+  # get_game_list
+  return 0
 }
 
 main $@
