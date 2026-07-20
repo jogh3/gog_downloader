@@ -10,6 +10,7 @@ if [[ $? -eq 1 ]]; then
   echo "jq not installed"
   exit 1
 fi
+
 readonly config_dir="$HOME/.config/gog_downloader"
 readonly config_file="$config_dir/config.json"
 readonly default_dl_loc="$HOME/Documents/gog_games"
@@ -83,7 +84,7 @@ get_authentication(){
   local redirect_url
   read -rp "paste the full redirect url here: " redirect_url
   local login_code=$(echo "$redirect_url" | grep -oP 'code=\K[^&]+')
-  local code_response=$(curl "https://auth.gog.com/token?client_id=46899977096215655&client_secret=9d85c43b1482497dbbce61f6e4aa173a433796eeae2ca8c5f6129f2dc4de46d9&grant_type=authorization_code&code=$login_code&redirect_uri=https%3A%2F%2Fembed.gog.com%2Fon_login_success%3Forigin%3Dclient")
+  local code_response=$(curl -s "https://auth.gog.com/token?client_id=46899977096215655&client_secret=9d85c43b1482497dbbce61f6e4aa173a433796eeae2ca8c5f6129f2dc4de46d9&grant_type=authorization_code&code=$login_code&redirect_uri=https%3A%2F%2Fembed.gog.com%2Fon_login_success%3Forigin%3Dclient")
   refresh_token=$( echo $code_response | jq -r '.refresh_token')
   if [[ "$refresh_token" == "null" ]]; then
     refresh_token=""
@@ -94,9 +95,31 @@ get_authentication(){
   fi
 }
 
+use_refresh() {
+  local saved_refresh_token=$( jq -r '.refresh_token' "$config_file")
+  local response=$(curl -s "https://auth.gog.com/token?client_id=46899977096215655&client_secret=9d85c43b1482497dbbce61f6e4aa173a433796eeae2ca8c5f6129f2dc4de46d9&grant_type=refresh_token&refresh_token=$saved_refresh_token")
+  local new_refresh_token=$(echo "$response" | jq -r '.refresh_token')
+  if [[ "$new_refresh_token" != "null" ]]; then
+    jq --arg refresh_token "$new_refresh_token" '.refresh_token = $refresh_token' "$config_file" > /tmp/tmp.json && mv /tmp/tmp.json "$config_file"
+  fi
+  auth_code=$(echo "$response" | jq -r '.access_token')
+  if [[ "$auth_code" == "null" ]]; then
+    echo "no auth_code returned"
+    rm "$config_file"
+    exit 0
+  fi
+}
+
 get_game_list() {
   local game_id_list_url="https://embed.gog.com/user/data/games"
-  game_id_list=$(curl -H "Authorization: Bearer $auth_code" $game_list_url)
+  local game_id_list=$(curl -s -H "Authorization: Bearer $auth_code" $game_id_list_url)
+  local game_id_arr=( $( echo $game_id_list | jq '.owned.[]' ) )
+  local oifs=$IFS
+  IFS=","
+  local game_id_csv="${arr[*]}"
+  IFS=$oifs
+  local game_info_url="https://api.gog.com/products?ids=$game_id_cs"
+  full_game_list=$( curl -s $game_info_url )
 }
 
 main() {
@@ -104,14 +127,15 @@ main() {
   get_num_cores
   echo "max cores available: $max_cores"
   if [[ ! -f $config_file ]]; then
-    echo '{"dllocfolder":"$HOME/Documents/gog_games","refresh_token":""}' > $config_file
+    jq -n --arg dir "$default_dl_loc" '{"dllocfolder": $dir, "refresh_token": null}' > "$config_file"
   fi
   if [[ -z "$dllocfolder" ]]; then
-    dllocfolder="$(jq '.dllocfolder' "$config_file")"
+    dllocfolder="$(jq -r '.dllocfolder' "$config_file")"
   else
     jq --arg folder "$dllocfolder" '.dllocfolder = $folder' "$config_file" > /tmp/tmp.json && mv /tmp/tmp.json "$config_file"
   fi
-  if jq -e '.refresh_token' "$config_file" >/dev/null; then
+
+  if ! jq -e '.refresh_token' "$config_file" >/dev/null; then
     get_authentication
     if [[ ! -z "$refresh_token" ]]; then
       echo "writing refresh_token to file"
@@ -120,7 +144,12 @@ main() {
       echo "no refresh_token was returned" 
     fi
   fi
-  # get_game_list
+  if [[ -z $auth_code ]]; then
+    use_refresh
+  fi
+  echo "$auth_code"
+  echo "getting all games"
+  get_game_list
   return 0
 }
 
