@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 
+# package tests
 type curl > /dev/null 2>&1
 if [[ $? -eq 1 ]]; then
   echo "curl not installed" >&2
@@ -11,11 +12,19 @@ if [[ $? -eq 1 ]]; then
   exit 1
 fi
 
+type sort > /dev/null 2>&1
+if [[ $? -eq 1 ]]; then
+  echo "sort not installed" >&2
+  exit 1
+fi
+
+# a test to see if associative arrays work
 if ! declare -A test_arr; then
   echo "unable to declare associative array, check bash version, needs to be 4.0 or above" >&2
   exit 1
 fi
 
+# constants
 readonly config_dir="$HOME/.config/gog_downloader"
 readonly config_file="$config_dir/config.json"
 readonly default_dl_loc="$HOME/Documents/gog_games"
@@ -28,6 +37,7 @@ user_inp_cores=0
 auth_code=""
 refresh_token=""
 
+# gets the number of ONLINE cores that the system has available
 get_num_cores() {
   read -r online_str < /sys/devices/system/cpu/online
   IFS=',' read -ra elements <<< "$online_str"
@@ -40,9 +50,10 @@ get_num_cores() {
           (( max_cores++ ))
       fi
   done
-  (( max_cores -- ))
+  (( max_cores-- ))
 }
 
+# parses the arguments passed into the script
 parse_args(){
 
   local help_message="
@@ -76,6 +87,10 @@ parse_args(){
         shift 2
         ;;
       -s|--set-max-cores)
+        if [[ -z "$2" ]] || [[ "$2" =~ ^- ]]; then
+          echo "no core amount specified"
+          exit 1
+        fi
         user_inp_cores=$2
         shift 2
         ;;
@@ -88,6 +103,7 @@ parse_args(){
   done
 }
 
+# this sets up the first time authentication, shouldn't need to be done more than once
 get_authentication(){
   echo "open: https://auth.gog.com/auth?client_id=46899977096215655&redirect_uri=https%3A%2F%2Fembed.gog.com%2Fon_login_success%3Forigin%3Dclient&response_type=code&layout=client2"
   local redirect_url
@@ -104,21 +120,26 @@ get_authentication(){
   fi
 }
 
+# uses the refresh token you get from the first authentication, then renews it
 use_refresh() {
   local saved_refresh_token=$( jq -r '.refresh_token' "$config_file")
   local response=$(curl -s "https://auth.gog.com/token?client_id=46899977096215655&client_secret=9d85c43b1482497dbbce61f6e4aa173a433796eeae2ca8c5f6129f2dc4de46d9&grant_type=refresh_token&refresh_token=$saved_refresh_token")
   local new_refresh_token=$(echo "$response" | jq -r '.refresh_token')
   if [[ "$new_refresh_token" != "null" ]]; then
     jq --arg refresh_token "$new_refresh_token" '.refresh_token = $refresh_token' "$config_file" > /tmp/tmp.json && mv /tmp/tmp.json "$config_file"
+  else
+    echo "no refresh token returned"
+    jq '.refresh_token = ""' "$config_file" > /tmp/tmp.json && mv /tmp/tmp.json "$config_file"
+    exit 0
   fi
   auth_code=$(echo "$response" | jq -r '.access_token')
   if [[ "$auth_code" == "null" ]]; then
     echo "no auth_code returned"
-    rm "$config_file"
     exit 0
   fi
 }
 
+# gets the full game list
 get_game_list() {
   local game_id_list_url="https://embed.gog.com/user/data/games"
   local game_id_list=$(curl -s -H "Authorization: Bearer $auth_code" $game_id_list_url)
@@ -127,14 +148,22 @@ get_game_list() {
   local full_game_array=()
   local oifs=$IFS
   IFS=","
+  # the products api call has a maximum of 50 items, so splits it into 50 item chunks
   for (( i=0;i<total_games;i+=50 )); do
+    # sleep to not overwhelm the api and get banned
+    if [[ $i -gt 0 ]]; then
+      sleep 0.5
+    fi
     local chunk=("${game_id_arr[@]:i:50}")
     local game_id_csv="${chunk[*]}"
     local game_info_url="https://api.gog.com/products?ids=$game_id_csv"
     local chunk_data=$(curl -s "$game_info_url")
-    readarray -t -o "${#full_game_array[@]}" full_game_array < <(echo "$chunk_data" | jq -c '.[]' )
+    # appends the ids to the game array
+    readarray -t -O "${#full_game_array[@]}" full_game_array < <(echo "$chunk_data" | jq -c '.[]' )
   done
   IFS=$oifs
+  # echo "first game: ${full_game_array[0]}"
+  # fills an associative array with the games and their id
   declare -A -g game_title_arr
   for game in "${full_game_array[@]}"; do
     local game_id=$( echo "$game" | jq -r ".id" )
@@ -145,28 +174,53 @@ get_game_list() {
       game_title_arr["$game_name"]=$game_id
     fi
   done
-  }
+}
 
-  main() {
+get_download_links() {
+  local game_id=$1
+  local game_info_url="https://api.gog.com/products/$game_id?expand=downloads,expanded_dlcs"
+  local tries=0
+  while (( tries < 3 )); do
+    (( i++ ))
+    local raw_response=$(curl -s -w "%{http_code}" -H "authorization: bearer $auth_code" "$game_info_url")
+    local http_code="${raw_response: -3}"
+    local json_body="${raw_response:0:${#raw_response}-3}"
+    if [[ "$http_code" -eq "200" ]]; then
+      break
+    elif [[ "$http_code" -eq "401" ]]; then
+      use_refresh
+      continue
+    fi
+  done
+  echo "$json_body"
+}
+
+main() {
   parse_args $@
   get_num_cores
 
   if [[ "$max_cores" -lt $user_inp_cores ]]; then
-    echo "user entered cores is bigger than available, using system max"
+    echo "user entered core amount is bigger than available, using system max(-1)"
   else
-    max_cores=$user_inp_cores
+    if [[ "$user_inp_cores" -gt 0 ]]; then
+      max_cores=$user_inp_cores
+    fi
   fi
   
   echo "max cores available: $max_cores"
+
+  # creates a default config if it doesn't exist yet
   if [[ ! -f $config_file ]]; then
     jq -n --arg dir "$default_dl_loc" '{"dllocfolder": $dir, "refresh_token": null}' > "$config_file"
   fi
+
   if [[ -z "$dllocfolder" ]]; then
     dllocfolder="$(jq -r '.dllocfolder' "$config_file")"
   else
     jq --arg folder "$dllocfolder" '.dllocfolder = $folder' "$config_file" > /tmp/tmp.json && mv /tmp/tmp.json "$config_file"
   fi
 
+  # if no refresh_token in config, then run first time authentication and write it
   if ! jq -e '.refresh_token' "$config_file" >/dev/null; then
     get_authentication
     if [[ ! -z "$refresh_token" ]]; then
@@ -176,6 +230,7 @@ get_game_list() {
       echo "no refresh_token was returned" 
     fi
   fi
+  # if the auth_code is empty get a new one
   if [[ -z $auth_code ]]; then
     use_refresh
   fi
@@ -185,18 +240,20 @@ get_game_list() {
   get_game_list
   echo "choose the game you want to download:"
   i=0
-  local game_internal_id_arr=()
-  for key in "${!game_title_arr[@]}"; do
-    game_internal_id_arr[$i]="$key"
-    echo "($i): $key"
+  # a second array to map the order to the number
+  local game_internal_id_arr
+  readarray -t game_internal_id_arr < <(printf '%s\n' "${!game_title_arr[@]}" | sort -f)
+  for game in "${game_internal_id_arr[@]}"; do
+    echo "($i): $game"
     (( i++ ))
   done
-  echo "enter the number of the game"
+  echo "enter the number of the game:"
   local game_choice
   read -r game_choice
   local game_chosen="${game_internal_id_arr[$game_choice]}"
-  local id_chosen="${game_title_arr[$game_choice]}"
-
+  local id_chosen="${game_title_arr[$game_chosen]}"
+  echo "$id_chosen: $game_chosen"
+  get_download_links $id_chosen
   return 0
 }
 

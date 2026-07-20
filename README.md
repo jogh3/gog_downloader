@@ -10,4 +10,4 @@ a way of downloading GOG game executables on linux
 ```
 
 
-### **Ensure curl and JQ is installed on your machine**
+### **Ensure curl and jq and sort is installed on your machine**
