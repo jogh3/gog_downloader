@@ -2,12 +2,17 @@
 
 type curl > /dev/null 2>&1
 if [[ $? -eq 1 ]]; then
-  echo "curl not installed"
+  echo "curl not installed" >&2
   exit 1
 fi
 type jq > /dev/null 2>&1
 if [[ $? -eq 1 ]]; then
-  echo "jq not installed"
+  echo "jq not installed" >&2
+  exit 1
+fi
+
+if ! declare -A test_arr; then
+  echo "unable to declare associative array, check bash version, needs to be 4.0 or above" >&2
   exit 1
 fi
 
@@ -16,7 +21,10 @@ readonly config_file="$config_dir/config.json"
 readonly default_dl_loc="$HOME/Documents/gog_games"
 dllocfolder=""
 mkdir -p "$config_dir"
+
 max_cores=0
+user_inp_cores=0
+
 auth_code=""
 refresh_token=""
 
@@ -67,7 +75,8 @@ parse_args(){
         dllocfolder="${dllocfolder%/}"
         shift 2
         ;;
-      --game | -g)
+      -s|--set-max-cores)
+        user_inp_cores=$2
         shift 2
         ;;
       *)
@@ -114,17 +123,40 @@ get_game_list() {
   local game_id_list_url="https://embed.gog.com/user/data/games"
   local game_id_list=$(curl -s -H "Authorization: Bearer $auth_code" $game_id_list_url)
   local game_id_arr=( $( echo $game_id_list | jq '.owned.[]' ) )
+  local total_games=${#game_id_arr[@]}
+  local full_game_array=()
   local oifs=$IFS
   IFS=","
-  local game_id_csv="${arr[*]}"
+  for (( i=0;i<total_games;i+=50 )); do
+    local chunk=("${game_id_arr[@]:i:50}")
+    local game_id_csv="${chunk[*]}"
+    local game_info_url="https://api.gog.com/products?ids=$game_id_csv"
+    local chunk_data=$(curl -s "$game_info_url")
+    readarray -t -o "${#full_game_array[@]}" full_game_array < <(echo "$chunk_data" | jq -c '.[]' )
+  done
   IFS=$oifs
-  local game_info_url="https://api.gog.com/products?ids=$game_id_cs"
-  full_game_list=$( curl -s $game_info_url )
-}
+  declare -A -g game_title_arr
+  for game in "${full_game_array[@]}"; do
+    local game_id=$( echo "$game" | jq -r ".id" )
+    local game_name=$( echo "$game" | jq -r ".title" )
+    if [[ -n "${game_title_arr["$game_name"]}" ]]; then
+      game_title_arr["$game_name ($game_id)"]=$game_id
+    else
+      game_title_arr["$game_name"]=$game_id
+    fi
+  done
+  }
 
-main() {
+  main() {
   parse_args $@
   get_num_cores
+
+  if [[ "$max_cores" -lt $user_inp_cores ]]; then
+    echo "user entered cores is bigger than available, using system max"
+  else
+    max_cores=$user_inp_cores
+  fi
+  
   echo "max cores available: $max_cores"
   if [[ ! -f $config_file ]]; then
     jq -n --arg dir "$default_dl_loc" '{"dllocfolder": $dir, "refresh_token": null}' > "$config_file"
@@ -147,9 +179,24 @@ main() {
   if [[ -z $auth_code ]]; then
     use_refresh
   fi
-  echo "$auth_code"
+  # echo "$auth_code"
+
   echo "getting all games"
   get_game_list
+  echo "choose the game you want to download:"
+  i=0
+  local game_internal_id_arr=()
+  for key in "${!game_title_arr[@]}"; do
+    game_internal_id_arr[$i]="$key"
+    echo "($i): $key"
+    (( i++ ))
+  done
+  echo "enter the number of the game"
+  local game_choice
+  read -r game_choice
+  local game_chosen="${game_internal_id_arr[$game_choice]}"
+  local id_chosen="${game_title_arr[$game_choice]}"
+
   return 0
 }
 
