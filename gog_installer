@@ -28,6 +28,8 @@ fi
 readonly config_dir="$HOME/.config/gog_downloader"
 readonly config_file="$config_dir/config.json"
 readonly default_dl_loc="$HOME/Documents/gog_games"
+readonly save_cursor_position='\e[s'
+readonly reset_menu_area='\e[u\e[J'
 dllocfolder=""
 mkdir -p "$config_dir"
 
@@ -166,14 +168,38 @@ get_game_list() {
   # fills an associative array with the games and their id
   declare -A -g game_title_arr
   for game in "${full_game_array[@]}"; do
-    local game_id=$( echo "$game" | jq -r ".id" )
-    local game_name=$( echo "$game" | jq -r ".title" )
-    if [[ -n "${game_title_arr["$game_name"]}" ]]; then
-      game_title_arr["$game_name ($game_id)"]=$game_id
-    else
-      game_title_arr["$game_name"]=$game_id
+    local game_type=$(echo $game | jq -r ".game_type")
+    if [[ "$game_type"  == "game" ]]; then
+      local game_id=$( echo "$game" | jq -r ".id" )
+      local game_name=$( echo "$game" | jq -r ".title" )
+      if [[ -n "${game_title_arr["$game_name"]}" ]]; then
+        game_title_arr["$game_name ($game_id)"]=$game_id
+      else
+        game_title_arr["$game_name"]=$game_id
+      fi
     fi
   done
+}
+
+convert_to_human() {
+    local size=$1
+    local precision=10
+    readable_size=0
+    if (( size >= 1073741824 )); then
+        # Multiply by 10 first to save one decimal place of precision
+        local scaled=$(( size * $precision / 1073741824 ))
+        # Extract the whole number and the decimal remainder
+        local int=$(( scaled / $precision ))
+        local dec=$(( scaled % $precision ))
+        printf -v readable_size "%d.%02d" "$int" "$dec"
+        unit="GiB"
+    else
+        local scaled=$(( size * $precision / 1048576 ))
+        local int=$(( scaled / $precision ))
+        local dec=$(( scaled % $precision ))
+        printf -v readable_size "%d.%02d" "$int" "$dec"
+        unit="MiB"
+    fi
 }
 
 get_download_links() {
@@ -181,7 +207,7 @@ get_download_links() {
   local game_info_url="https://api.gog.com/products/$game_id?expand=downloads,expanded_dlcs"
   local tries=0
   while (( tries < 3 )); do
-    (( i++ ))
+    (( tries++ ))
     local raw_response=$(curl -s -w "%{http_code}" -H "authorization: bearer $auth_code" "$game_info_url")
     local http_code="${raw_response: -3}"
     local json_body="${raw_response:0:${#raw_response}-3}"
@@ -192,7 +218,36 @@ get_download_links() {
       continue
     fi
   done
-  echo "$json_body"
+  # echo "$json_body"
+  local downlinks
+  readarray -t downlinks < <(echo "$json_body" | jq -r '.downloads.installers[].files[].downlink' | sort -V)
+  local patches
+  readarray -t patches < <(echo "$json_body" | jq -r '.downloads.patches[].files[].downlink' | sort -V)
+
+  declare -A dlcs
+  declare -A dlcs_size
+  while IFS=$'\t' read -r name downlink size; do
+    [[ -z "$name" ]] && continue
+    dlcs["$name"]="$downlink"
+    convert_to_human $size
+    dlcs_size["$name"]="$readable_size $unit"
+  done < <(echo "$json_body" | jq -r ' .expanded_dlcs[]?.downloads.installers[]? | [.name, .files[]?.downlink, .total_size] | @tsv')
+
+  base_size=$(echo "$json_body" | jq -r '.downloads.installers[0].total_size')
+  convert_to_human $base_size
+  human_base_size="$readable_size $unit"
+  patches_size=$(echo "$json_body" | jq -r '.downloads.patches[0]?.total_size')
+  convert_to_human $patches_size
+  human_patches_size="$readable_size $unit"
+
+  echo "main downloads:"
+  printf '%s\n' "${downlinks[@]}"
+  echo "$human_base_size"
+  echo "patches:"
+  printf '%s\n' "${patches[@]}"
+  echo "$human_patches_size"
+  echo "dlcs:"
+  printf '%s\n' "${!dlcs[@]}"
 }
 
 main() {
@@ -237,24 +292,36 @@ main() {
   # echo "$auth_code"
 
   echo "getting all games"
-  get_game_list
-  echo "choose the game you want to download:"
-  i=0
-  # a second array to map the order to the number
-  local game_internal_id_arr
-  readarray -t game_internal_id_arr < <(printf '%s\n' "${!game_title_arr[@]}" | sort -f)
-  for game in "${game_internal_id_arr[@]}"; do
-    echo "($i): $game"
-    (( i++ ))
+  echo -ne "$save_cursor_position"
+  while true; do
+    echo -ne "$reset_menu_area"
+    get_game_list
+    echo "choose the game you want to download:"
+    i=0
+    # a second array to map the order to the number
+    local game_internal_id_arr
+    readarray -t game_internal_id_arr < <(printf '%s\n' "${!game_title_arr[@]}" | sort -f)
+    for game in "${game_internal_id_arr[@]}"; do
+      echo "($i): $game"
+      (( i++ ))
+    done
+    echo "enter the number of the game, r to refresh the game list, and q to quit:"
+    local game_choice
+    read -r game_choice
+    if [[ "$game_choice" =~ [qQ] ]]; then
+      break
+    fi
+    local game_chosen="${game_internal_id_arr[$game_choice]}"
+    if [[ ! "$game_choice" =~ ^[0-9]+$ ]] || [[ "$game_choice" =~ [Rr] ]] || [[ -z "$game_chosen" ]] ; then
+      unset game_title_arr
+      continue
+    fi
+    local id_chosen="${game_title_arr[$game_chosen]}"
+    # echo "$id_chosen: $game_chosen"
+    get_download_links "$id_chosen"
+    exit 0
   done
-  echo "enter the number of the game:"
-  local game_choice
-  read -r game_choice
-  local game_chosen="${game_internal_id_arr[$game_choice]}"
-  local id_chosen="${game_title_arr[$game_chosen]}"
-  echo "$id_chosen: $game_chosen"
-  get_download_links $id_chosen
-  return 0
+  exit 0
 }
 
 main $@
