@@ -191,13 +191,13 @@ convert_to_human() {
         # Extract the whole number and the decimal remainder
         local int=$(( scaled / $precision ))
         local dec=$(( scaled % $precision ))
-        printf -v readable_size "%d.%02d" "$int" "$dec"
+        readable_size="${int}.${dec}"
         unit="GiB"
     else
         local scaled=$(( size * $precision / 1048576 ))
         local int=$(( scaled / $precision ))
         local dec=$(( scaled % $precision ))
-        printf -v readable_size "%d.%02d" "$int" "$dec"
+        readable_size="${int}.${dec}"
         unit="MiB"
     fi
 }
