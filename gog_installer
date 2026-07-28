@@ -229,9 +229,15 @@ get_download_links() {
   fi
   unset downlinks patches dlcs dlcs_size
   # echo "$json_body"
+  local target_os="windows"
+  local has_linux=$(echo "$json_body" | jq -r 'if (.downloads.installers | map(select(.os == "linux")) | length > 0) then "yes" else "no" end')
+  if [[ "$has_linux" == "yes" ]]; then
+    target_os="linux"
+  fi
+
   # get the links from response, and sort them as jq returns lexographical sort
-  readarray -t downlinks < <(echo "$json_body" | jq -r '.downloads.installers[].files[].downlink' | sort -V)
-  readarray -t patches < <(echo "$json_body" | jq -r '.downloads.patches[].files[]?.downlink' | sort -V)
+  readarray -t downlinks < <(echo "$json_body" | jq -r --arg os "$target_os" '.downloads.installers[] | select(.os == $os) | .files[].downlink' | sort -V)
+  readarray -t patches < <(echo "$json_body" | jq -r --arg os "$target_os" '.downloads.patches[]? | select(.os == $os) | .files[]?.downlink' | sort -V)
   if [[ $patches == "null" ]]; then
     patches=()
   fi
@@ -243,7 +249,7 @@ get_download_links() {
     dlcs["$name"]+="$downlink\t"
     convert_to_human $size
     dlcs_size["$name"]="$readable_size $unit"
-  done < <(echo "$json_body" | jq -r ' .expanded_dlcs[]?.downloads.installers[]? | [.name, .files[]?.downlink, .total_size] | @tsv')
+  done < <(echo "$json_body" | jq -r '.expanded_dlcs[]?.downloads.installers[]? | .name as $n | .files | to_entries[]? | ["\($n) (Part \(.key + 1))", .value.downlink, .value.size] | @tsv')
 
   # gets the sizes and turns them from bytes into human readable format
   base_size=$(echo "$json_body" | jq -r '.downloads.installers[0].total_size')
@@ -291,7 +297,7 @@ main() {
   else
     jq --arg folder "$dllocfolder" '.dllocfolder = $folder' "$config_file" > /tmp/tmp.json && mv /tmp/tmp.json "$config_file"
   fi
-
+  mkdir -p "$dllocfolder"
   # if no refresh_token in config, then run first time authentication and write it
   if ! jq -e '.refresh_token' "$config_file" >/dev/null; then
     get_authentication
@@ -312,6 +318,7 @@ main() {
   echo -ne "$save_cursor_position"
   while true; do
     echo -ne "$reset_menu_area"
+    unset game_title_arr
     get_game_list
     echo "choose the game you want to download:"
     i=0
@@ -345,6 +352,7 @@ main() {
     local menu_index=0
     # giant array with all the links
     local master_links=()
+    echo "download choices for $game_chosen: $id_chosen"
     echo "base game downloads:"
     for (( i=0; i < ${#downlinks[@]}; i++ )); do
       echo "$menu_index: installer $i"
@@ -397,7 +405,7 @@ main() {
           readarray -d '' -t all_selected < <(printf '%s\0' "${master_links[@]}")
           break
         fi
-        if [[ "$item" =~ "*"* ]]; then
+        if [[ "$item" == "*"* ]]; then
           case "$item" in
             "*b")
               readarray -d '' -t all_selected -O ${#all_selected[@]} < <(printf '%s\0' "${downlinks[@]}")
@@ -409,6 +417,11 @@ main() {
               readarray -d '' -t all_selected -O ${#all_selected[@]} < <(printf '%s\0' "${dlcs[@]}")
               ;;
             "*")
+              echo "invalid item: $item, use proper syntax"
+              sleep 2
+              printf '\e[1A\r\e[2K'
+              is_valid=1
+              break
               ;;
           esac
           continue
@@ -425,8 +438,50 @@ main() {
         fi
       done
     done
+    echo -ne "$reset_menu_area"
+    echo "downloading game"
+    game_download_dir="${dllocfolder}/${game_chosen}"
+    mkdir -p "$game_download_dir" 
+    declare -A active_pids
+    local no_processes=0
+    while (( no_processes > 0 || ${#all_selected[@]} > 0 )); do
 
-    exit 0
+      while (( no_processes < max_cores )) && (( ${#all_selected[@]} > 0 )); do
+
+        local current_link="${all_selected[0]}"
+        all_selected=("${all_selected[@]:1}")
+        local cdn_json=$(curl -s -H "authorization: bearer $auth_code" "$current_link")
+        local real_downlink=$(echo "$cdn_json" | jq -r '.downlink')
+        local filename="${real_downlink##*/}"
+
+        curl -s -L -O --output-dir "$game_download_dir" "$real_downlink" &
+
+        local new_pid=$!
+        active_pids[$new_pid]="$filename"
+
+        (( no_processes++ ))
+      done
+
+      echo "currently downloading:"
+
+      for pid in "${!active_pids[@]}"; do
+
+        if kill -0 "$pid" 2>/dev/null; then
+          echo " -> ${active_pids[$pid]}"
+        else
+          unset active_pids["$pid"]
+        fi
+      done
+
+      no_processes=${#active_pids[@]}
+      if (( no_processes > 0 )); then
+
+        sleep 2
+        local lines_to_clear=$(( no_processes + 1 ))
+        printf "\e[%sA\e[J" "$lines_to_clear"
+
+      fi
+    done
   done
   exit 0
 }
